@@ -119,15 +119,37 @@ class HandTracker:
     
     @staticmethod
     def calculate_depth_velocity(current_landmarks, prev_landmarks, time_delta) -> float:
-        """Calculate the speed of hand movement towards or away from the camera"""
+        """Calculate the speed of hand movement towards or away from the camera with smoothing"""
         if not current_landmarks or not prev_landmarks or time_delta <= 0:
             return 0.0
         
-        # Use the wrist landmark for depth calculation
-        current_z = current_landmarks.landmark[HandLandmark.WRIST].z
-        prev_z = prev_landmarks.landmark[HandLandmark.WRIST].z
+        # Use multiple landmarks to get a more stable depth value
+        # Average depth from wrist and all finger MCP joints
+        current_depth_points = [
+            current_landmarks.landmark[HandLandmark.WRIST],
+            current_landmarks.landmark[HandLandmark.INDEX_FINGER_MCP],
+            current_landmarks.landmark[HandLandmark.MIDDLE_FINGER_MCP],
+            current_landmarks.landmark[HandLandmark.RING_FINGER_MCP],
+            current_landmarks.landmark[HandLandmark.PINKY_MCP]
+        ]
+        
+        prev_depth_points = [
+            prev_landmarks.landmark[HandLandmark.WRIST],
+            prev_landmarks.landmark[HandLandmark.INDEX_FINGER_MCP],
+            prev_landmarks.landmark[HandLandmark.MIDDLE_FINGER_MCP],
+            prev_landmarks.landmark[HandLandmark.RING_FINGER_MCP],
+            prev_landmarks.landmark[HandLandmark.PINKY_MCP]
+        ]
+        
+        # Calculate average depth
+        current_z = sum(point.z for point in current_depth_points) / len(current_depth_points)
+        prev_z = sum(point.z for point in prev_depth_points) / len(prev_depth_points)
         
         # Calculate velocity (negative = towards camera, positive = away from camera)
         velocity = (current_z - prev_z) / time_delta
         
+        # Apply additional threshold to filter out tiny movements (jitter)
+        if abs(velocity) < 0.01:
+            velocity = 0.0
+            
         return velocity

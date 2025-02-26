@@ -138,7 +138,10 @@ class TrackingApp:
                 hands_results.multi_handedness
             ):
                 # Identify hand as left or right
-                hand_type = handedness.classification[0].label
+                # Note: MediaPipe returns "Left"/"Right" based on image perspective
+                # Since we're flipping the image horizontally, we need to flip handedness too
+                hand_label = handedness.classification[0].label
+                hand_type = "Right" if hand_label == "Left" else "Left"
                 
                 if hand_type == "Left":
                     self.tracking_data["hands"]["left"] = hand_landmarks
@@ -185,120 +188,196 @@ class TrackingApp:
             )
 
     def draw_debug_info(self, frame):
-        """Draw debug information on the frame showing all tracked features."""
+        """Create and update a separate debug information window."""
         if not self.debug_display:
-            return
-            
-        features = self.tracking_data["features"]
-        if not features:
-            return
-            
-        # Set up text properties
-        font = cv2.FONT_HERSHEY_SIMPLEX
-        font_scale = 0.4
-        font_thickness = 1
-        text_color = (0, 255, 0)  # Green
-        bg_color = (0, 0, 0)  # Black background
-        padding = 5
-        line_height = 20
+            # If debug window exists but debug is disabled, close it
+            if hasattr(self, 'debug_window_created') and self.debug_window_created:
+                cv2.destroyWindow('Debug Info')
+                self.debug_window_created = False
+                if hasattr(self, 'mouse_callback_set'):
+                    self.mouse_callback_set = False
+                return
         
-        # Create categorized feature groups
-        feature_groups = {
-            "Left Hand": {},
-            "Right Hand": {},
-            "Face": {},
-            "Body": {},
-            "Relationships": {}
+        # Define all trackable features by category
+        feature_categories = {
+            "Left Hand": [
+                "hand_pinch_left", 
+                "hand_height_left", 
+                "hand_openness_left",
+                "hand_depth_velocity_left"
+            ],
+            "Right Hand": [
+                "hand_pinch_right", 
+                "hand_height_right", 
+                "hand_openness_right",
+                "hand_depth_velocity_right"
+            ],
+            "Face": [
+                "face_rot_x",
+                "face_rot_y",
+                "face_rot_z",
+                "face_mouth_openness",
+                "face_eye_openness"
+            ],
+            "Body": [
+                "body_rotation_y",
+                "body_pos_y",
+                "left_arm_extension",
+                "right_arm_extension",  # Added right arm extension
+                "body_depth_velocity"
+            ],
+            "Relationships": [
+                "hands_distance",
+                "hands_mirroring_x",
+                "hands_mirroring_y",
+                "left_hand_near_face",
+                "right_hand_near_face"  # Added right hand near face
+            ]
         }
         
-        # Categorize features
-        for key, value in features.items():
-            if isinstance(value, (int, float)):
-                if "left" in key and "hand" in key:
-                    feature_groups["Left Hand"][key] = value
-                elif "right" in key and "hand" in key:
-                    feature_groups["Right Hand"][key] = value
-                elif "face" in key:
-                    feature_groups["Face"][key] = value
-                elif "body" in key or "arm" in key:
-                    feature_groups["Body"][key] = value
-                elif "distance" in key or "mirroring" in key or "near" in key:
-                    feature_groups["Relationships"][key] = value
+        # Get current feature values
+        features = self.tracking_data["features"]
         
-        # Draw features by category
-        y_offset = 30
-        x_offset = 10
-        max_width = frame.shape[1] - 20
-        col_width = max_width // 2
+        # Create a blank image for debug info
+        debug_width = 600
+        debug_height = 800
+        debug_image = np.zeros((debug_height, debug_width, 3), dtype=np.uint8)
+        
+        # Set up text properties
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 0.6
+        font_thickness = 1
+        normal_color = (200, 200, 200)  # Light gray
+        na_color = (0, 0, 255)  # Red for N/A values
+        title_color = (100, 255, 100)  # Green for titles
+        bg_color = (50, 50, 50)  # Dark gray for category headers
+        highlight_color = (100, 100, 255)  # Highlight color for clickable areas
+        padding = 8
+        
+        # Track collapsible states and y-positions of headers if not already initialized
+        if not hasattr(self, 'category_collapsed'):
+            self.category_collapsed = {category: False for category in feature_categories.keys()}
+            self.debug_window_created = False
+            self.header_y_positions = {}  # Store y-positions of headers for click detection
         
         # Function to draw text with background
-        def draw_text_with_bg(frame, text, x, y):
+        def draw_text_with_bg(image, text, x, y, color, bg=None, clickable=False):
             text_size = cv2.getTextSize(text, font, font_scale, font_thickness)[0]
-            cv2.rectangle(frame, (x - padding, y - text_size[1] - padding), 
-                         (x + text_size[0] + padding, y + padding), bg_color, -1)
-            cv2.putText(frame, text, (x, y), font, font_scale, text_color, font_thickness)
-            return text_size[1] + 2 * padding
+            if bg is not None:
+                # Draw background rectangle
+                cv2.rectangle(image, 
+                            (x - padding, y - text_size[1] - padding), 
+                            (x + text_size[0] + padding, y + padding), 
+                            bg, -1)
+                
+                # Add border for clickable items
+                if clickable:
+                    cv2.rectangle(image, 
+                                (x - padding, y - text_size[1] - padding), 
+                                (x + text_size[0] + padding, y + padding), 
+                                highlight_color, 1)
+            
+            cv2.putText(image, text, (x, y), font, font_scale, color, font_thickness)
+            return text_size[1] + 2 * padding, text_size[0] + 2 * padding  # Return height and width
         
-        # Draw each category
-        for group_idx, (category, category_features) in enumerate(feature_groups.items()):
-            if not category_features:
-                continue
-            
-            # Determine column
-            col = group_idx % 2
-            if group_idx > 0 and group_idx % 2 == 0:
-                y_offset = 30  # Reset Y for new row
-            
-            x = x_offset + col * col_width
-            
-            # Draw category title
-            title = f"{category} Features:"
-            height = draw_text_with_bg(frame, title, x, y_offset)
-            y_offset += height + 5
-            
-            # Draw features
-            for key, value in sorted(category_features.items()):
-                # Format the value
-                if abs(value) < 0.001:
-                    value_str = "0.000"
-                else:
-                    value_str = f"{value:.3f}"
-                
-                # Clean up the key name
-                display_key = key.replace("_", " ").title()
-                
-                # Create feature text
-                feature_text = f"{display_key}: {value_str}"
-                
-                height = draw_text_with_bg(frame, feature_text, x, y_offset)
-                y_offset += height
-                
-                # Check if we need to move to next column
-                if y_offset > frame.shape[0] - 30:
-                    col += 1
-                    y_offset = 30
-                    x = x_offset + col * col_width
-                    if col >= 2:  # Reset if we exceed columns
-                        break
-                        
-            # Add space between categories
-            y_offset += 15
-            
+        # Draw title
+        y_offset = 40
+        title_font_scale = 0.8
+        cv2.putText(debug_image, "Tracking Debug Information", 
+                (20, y_offset), font, title_font_scale, 
+                (255, 255, 255), 2)
+        y_offset += 40
+        
         # Draw connection status
-        connection_y = frame.shape[0] - 30
         if self.is_playing:
             status_text = "Ableton: Connected & Playing"
             status_color = (0, 255, 0)  # Green
         else:
             status_text = "Ableton: Connected (Not Playing)"
             status_color = (0, 255, 255)  # Yellow
-            
-        cv2.putText(frame, status_text, (10, connection_y), font, 0.6, status_color, 2)
         
-        # Draw controls hint
-        controls_text = "ESC: Exit | SPACE: Toggle Debug Display"
-        cv2.putText(frame, controls_text, (10, connection_y + 20), font, 0.5, (255, 255, 255), 1)
-
+        height, _ = draw_text_with_bg(debug_image, status_text, 20, y_offset, status_color)
+        y_offset += height + 10
+        
+        # Clear previous header positions
+        self.header_y_positions = {}
+        
+        # Draw each category
+        for category, feature_keys in feature_categories.items():
+            # Draw category header (clickable)
+            header_text = f"[{'+' if self.category_collapsed[category] else '-'}] {category}"
+            
+            # Store this header's y-position for click detection
+            self.header_y_positions[category] = y_offset
+            
+            # Draw header with highlight to show it's clickable
+            height, width = draw_text_with_bg(
+                debug_image, header_text, 20, y_offset, 
+                title_color, bg_color, clickable=True
+            )
+            
+            y_offset += height + 5
+            
+            # If category is expanded, show features
+            if not self.category_collapsed[category]:
+                for key in feature_keys:
+                    # Format the key name for display
+                    display_key = key.replace("_", " ").title()
+                    
+                    # Get feature value if available
+                    if key in features and features[key] is not None:
+                        value = features[key]
+                        if isinstance(value, (int, float)):
+                            if abs(value) < 0.001:
+                                value_str = "0.000"
+                            else:
+                                value_str = f"{value:.3f}"
+                        else:
+                            value_str = str(value)
+                        color = normal_color
+                    else:
+                        value_str = "n/a"
+                        color = na_color
+                    
+                    feature_text = f"  {display_key}: {value_str}"
+                    height, _ = draw_text_with_bg(debug_image, feature_text, 40, y_offset, color)
+                    y_offset += height
+                
+                # Add space after category
+                y_offset += 10
+            else:
+                # For collapsed category, just add a small space
+                y_offset += 10
+        
+        # Draw info about how to interact
+        y_offset = debug_height - 60
+        instruction_color = (200, 200, 100)
+        cv2.putText(debug_image, "Click highlighted category headers to expand/collapse", 
+                (20, y_offset), font, 0.5, instruction_color, 1)
+        cv2.putText(debug_image, "ESC: Exit | SPACE: Toggle Debug Window", 
+                (20, y_offset + 25), font, 0.5, instruction_color, 1)
+        
+        # Display the debug window
+        cv2.imshow('Debug Info', debug_image)
+        self.debug_window_created = True
+        
+        # Define mouse callback function outside of the condition
+        def mouse_callback(event, x, y, flags, param):
+            if event == cv2.EVENT_LBUTTONDOWN:
+                # Check each category header position
+                for category, header_y in self.header_y_positions.items():
+                    # Check if click is within the header area (with some margin)
+                    header_height = 30  # Approximate header height
+                    if 20 <= x <= 580 and header_y - 15 <= y <= header_y + 15:
+                        # Toggle the category's collapsed state
+                        self.category_collapsed[category] = not self.category_collapsed[category]
+                        break
+        
+        # Handle mouse clicks for collapsing/expanding categories
+        if not hasattr(self, 'mouse_callback_set') or not self.mouse_callback_set:
+            cv2.setMouseCallback('Debug Info', mouse_callback)
+            self.mouse_callback_set = True
+        
     def send_data_to_touchdesigner(self):
         """Send all relevant tracking data to TouchDesigner."""
         # Send raw landmarks

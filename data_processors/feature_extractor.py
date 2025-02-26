@@ -200,18 +200,22 @@ class FeatureExtractor:
         features["face_eye_openness"] = eye_openness_norm
         
         # Face orientation (using specific face landmarks)
-        # This is a simplified version - for more accuracy, use proper 3D head pose estimation
+        # More robust face orientation calculations
         left_temple_idx = 234
         right_temple_idx = 454
         chin_idx = 152
         forehead_idx = 10
+        left_cheek_idx = 50    # Left cheek landmark
+        right_cheek_idx = 280  # Right cheek landmark
         
         left_temple = face_landmarks.landmark[left_temple_idx]
         right_temple = face_landmarks.landmark[right_temple_idx] 
         chin = face_landmarks.landmark[chin_idx]
         forehead = face_landmarks.landmark[forehead_idx]
+        left_cheek = face_landmarks.landmark[left_cheek_idx]
+        right_cheek = face_landmarks.landmark[right_cheek_idx]
         
-        # Calculate face rotation around y-axis (yaw)
+        # Calculate face rotation around y-axis (yaw - left/right)
         head_width = GeometryUtils.calculate_distance_3d(left_temple, right_temple)
         temple_diff_x = left_temple.x - right_temple.x
         
@@ -219,13 +223,27 @@ class FeatureExtractor:
         yaw = temple_diff_x / head_width * 2.0
         features["face_rot_y"] = yaw
         
-        # Calculate face rotation around x-axis (pitch)
+        # Calculate face rotation around x-axis (pitch - up/down)
         face_height = GeometryUtils.calculate_distance_3d(forehead, chin)
         height_diff_y = forehead.y - chin.y
         
         # Normalized to approximately -1 to 1 range
         pitch = height_diff_y / face_height * 2.0
         features["face_rot_x"] = pitch
+        
+        # Calculate face rotation around z-axis (roll - tilting left/right)
+        # Compare the y-positions of the temples to determine roll
+        temple_diff_y = left_temple.y - right_temple.y
+        
+        # Alternative calculation using cheeks for more stability
+        cheek_diff_y = left_cheek.y - right_cheek.y
+        
+        # Combine both measures for better stability
+        roll = (temple_diff_y + cheek_diff_y) / 2.0 / head_width * 4.0  # Scale appropriately
+        
+        # Normalize to approximately -1 to 1 range
+        roll = np.clip(roll, -1.0, 1.0)
+        features["face_rot_z"] = roll
         
         return features
     
@@ -261,20 +279,24 @@ class FeatureExtractor:
         
         # Calculate depth movement (towards/away from camera)
         if prev_landmarks and time_delta > 0:
-            # Use mid-shoulder for depth calculation
-            left_shoulder_idx = mp.solutions.pose.PoseLandmark.LEFT_SHOULDER.value
-            right_shoulder_idx = mp.solutions.pose.PoseLandmark.RIGHT_SHOULDER.value
+            # Use multiple points for more stable depth calculation
+            landmarks_to_use = [
+                mp.solutions.pose.PoseLandmark.LEFT_SHOULDER.value,
+                mp.solutions.pose.PoseLandmark.RIGHT_SHOULDER.value,
+                mp.solutions.pose.PoseLandmark.LEFT_HIP.value,
+                mp.solutions.pose.PoseLandmark.RIGHT_HIP.value
+            ]
             
-            curr_left_z = body_landmarks.landmark[left_shoulder_idx].z
-            curr_right_z = body_landmarks.landmark[right_shoulder_idx].z
-            curr_avg_z = (curr_left_z + curr_right_z) / 2.0
+            curr_z_values = [body_landmarks.landmark[idx].z for idx in landmarks_to_use]
+            prev_z_values = [prev_landmarks.landmark[idx].z for idx in landmarks_to_use]
             
-            prev_left_z = prev_landmarks.landmark[left_shoulder_idx].z
-            prev_right_z = prev_landmarks.landmark[right_shoulder_idx].z
-            prev_avg_z = (prev_left_z + prev_right_z) / 2.0
+            curr_avg_z = sum(curr_z_values) / len(curr_z_values)
+            prev_avg_z = sum(prev_z_values) / len(prev_z_values)
             
             depth_velocity = (curr_avg_z - prev_avg_z) / time_delta
-            # Normalize to a reasonable range
+            # Filter tiny movements and normalize to a reasonable range
+            if abs(depth_velocity) < 0.01:
+                depth_velocity = 0.0
             norm_velocity = np.clip(depth_velocity / 0.5, -1.0, 1.0)
             features["body_depth_velocity"] = norm_velocity
         
